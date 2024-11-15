@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>شبکه اجتماعی پیام صوتی</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.4.7/peerjs.min.js"></script>
+    <style>
+        body {
+            font-family: system-ui;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f0f2f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        button {
+            background: #1877f2;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+        }
+        button:disabled {
+            background: #cccccc;
+        }
+        input {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 16px;
+            margin: 5px;
+            width: 200px;
+        }
+        .room-info {
+            margin: 20px 0;
+            padding: 10px;
+            background: #e7f3ff;
+            border-radius: 6px;
+        }
+        .messages {
+            height: 400px;
+            overflow-y: auto;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            margin: 10px 0;
+        }
+        .message {
+            display: flex;
+            align-items: center;
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 6px;
+            background: white;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        }
+        .message.sent {
+            background: #e3f2fd;
+            margin-left: 20%;
+        }
+        .message.received {
+            background: white;
+            margin-right: 20%;
+        }
+        .record-button {
+            background: #dc3545;
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 10px;
+        }
+        .record-button.recording {
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+            100% { transform: scale(1); }
+        }
+        .controls {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+        .timer {
+            margin: 0 10px;
+            font-size: 18px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>شبکه اجتماعی پیام صوتی</h1>
+        
+        <div id="join-section">
+            <input type="text" id="room-code" placeholder="کد اتاق را وارد کنید">
+            <button onclick="joinRoom()">ورود به اتاق</button>
+            <button onclick="createRoom()">ایجاد اتاق جدید</button>
+        </div>
+
+        <div id="room-section" style="display: none;">
+            <div class="room-info">
+                <h2>اتاق گفتگو</h2>
+                <p>کد اتاق: <span id="current-room-code"></span></p>
+            </div>
+
+            <div class="messages" id="messages-container"></div>
+
+            <div class="controls">
+                <button id="record-btn" class="record-button" onclick="toggleRecording()">
+                    🎤
+                </button>
+                <span class="timer" id="timer">00:00</span>
+                <button id="send-btn" style="display: none;" onclick="sendRecording()">ارسال</button>
+                <button id="cancel-btn" style="display: none;" onclick="cancelRecording()">لغو</button>
+            </div>
+
+            <button onclick="leaveRoom()" style="margin-top: 10px;">خروج از اتاق</button>
+        </div>
+    </div>
+
+    <script>
+        let peer;
+        let currentRoom;
+        let connections = {};
+        let mediaRecorder;
+        let audioChunks = [];
+        let recordingStartTime;
+        let timerInterval;
+        let isRecording = false;
+
+        // IndexedDB setup
+        const dbName = "voiceMessageDB";
+        const dbVersion = 1;
+        let db;
+
+        const request = indexedDB.open(dbName, dbVersion);
+        
+        request.onerror = (event) => {
+            console.error("IndexedDB error:", event.target.error);
+        };
+
+        request.onsuccess = (event) => {
+            db = event.target.result;
+        };
+
+        request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains('messages')) {
+                const store = db.createObjectStore('messages', { keyPath: 'id', autoIncrement: true });
+                store.createIndex('roomCode', 'roomCode', { unique: false });
+                store.createIndex('timestamp', 'timestamp', { unique: false });
+            }
+        };
+
+        // Generate room code
+        function generateRoomCode() {
+            return Math.floor(100000 + Math.random() * 900000).toString();
+        }
+
+        // Create new room
+        async function createRoom() {
+            const roomCode = generateRoomCode();
+            initializePeer(roomCode);
+            showRoom(roomCode);
+        }
+
+        // Join existing room
+        async function joinRoom() {
+            const roomCode = document.getElementById('room-code').value;
+            if (roomCode.length !== 6) {
+                alert('لطفا کد ۶ رقمی معتبر وارد کنید');
+                return;
+            }
+            initializePeer(roomCode);
+            showRoom(roomCode);
+        }
+
+        // Initialize PeerJS
+        function initializePeer(roomCode) {
+            peer = new Peer(`${roomCode}-${Date.now()}`);
+            
+            peer.on('open', () => {
+                currentRoom = roomCode;
+                loadMessages(roomCode);
+            });
+
+            peer.on('connection', (conn) => {
+                setupConnection(conn);
+            });
+        }
+
+        function setupConnection(conn) {
+            connections[conn.peer] = conn;
+            
+            conn.on('data', async (data) => {
+                if (data.type === 'voice') {
+                    // Convert array buffer to blob
+                    const audioBlob = new Blob([data.audio], { type: 'audio/webm' });
+                    await saveMessage({
+                        roomCode: currentRoom,
+                        sender: conn.peer,
+                        timestamp: new Date(),
+                        audio: audioBlob
+                    });
+                    displayMessage(audioBlob, false);
+                }
+            });
+
+            conn.on('close', () => {
+                delete connections[conn.peer];
+            });
+        }
+
+        // Connect to all peers in room
+        function connectToPeers() {
+            Object.keys(connections).forEach(peerId => {
+                if (!connections[peerId]) {
+                    const conn = peer.connect(peerId);
+                    setupConnection(conn);
+                }
+            });
+        }
+
+        // Recording functions
+        async function toggleRecording() {
+            if (!isRecording) {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    startRecording(stream);
+                } catch (err) {
+                    console.error('Error accessing microphone:', err);
+                    alert('دسترسی به میکروفون امکان‌پذیر نیست');
+                }
+            } else {
+                stopRecording();
+            }
+        }
+
+        function startRecording(stream) {
+            mediaRecorder = new MediaRecorder(stream);
+            audioChunks = [];
+            isRecording = true;
+            recordingStartTime = Date.now();
+            
+            document.getElementById('record-btn').classList.add('recording');
+            document.getElementById('send-btn').style.display = 'none';
+            document.getElementById('cancel-btn').style.display = 'inline';
+            
+            startTimer();
+
+            mediaRecorder.ondataavailable = (event) => {
+                audioChunks.push(event.data);
+            };
+
+            mediaRecorder.onstop = () => {
+                stream.getTracks().forEach(track => track.stop());
+            };
+
+            mediaRecorder.start();
+        }
+
+        function stopRecording() {
+            if (mediaRecorder && isRecording) {
+                mediaRecorder.stop();
+                isRecording = false;
+                stopTimer();
+                
+                document.getElementById('record-btn').classList.remove('recording');
+                document.getElementById('send-btn').style.display = 'inline';
+                document.getElementById('cancel-btn').style.display = 'inline';
+            }
+        }
+
+        function cancelRecording() {
+            if (mediaRecorder && isRecording) {
+                mediaRecorder.stop();
+            }
+            isRecording = false;
+            audioChunks = [];
+            stopTimer();
+            
+            document.getElementById('record-btn').classList.remove('recording');
+            document.getElementById('send-btn').style.display = 'none';
+            document.getElementById('cancel-btn').style.display = 'none';
+            document.getElementById('timer').textContent = '00:00';
+        }
+
+        async function sendRecording() {
+            if (audioChunks.length > 0) {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                
+                // Save to IndexedDB
+                await saveMessage({
+                    roomCode: currentRoom,
+                    sender: peer.id,
+                    timestamp: new Date(),
+                    audio: audioBlob
+                });
+
+                // Display in UI
+                displayMessage(audioBlob, true);
+
+                // Send to all peers
+                Object.values(connections).forEach(conn => {
+                    conn.send({
+                        type: 'voice',
+                        audio: audioBlob
+                    });
+                });
+
+                // Reset recording state
+                cancelRecording();
+            }
+        }
+
+        // Timer functions
+        function startTimer() {
+            let seconds = 0;
+            timerInterval = setInterval(() => {
+                seconds++;
+                const minutes = Math.floor(seconds / 60);
+                const remainingSeconds = seconds % 60;
+                document.getElementById('timer').textContent = 
+                    `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
+            }, 1000);
+        }
+
+        function stopTimer() {
+            if (timerInterval) {
+                clearInterval(timerInterval);
+            }
+        }
+
+        // Message handling
+        async function saveMessage(message) {
+            const transaction = db.transaction(['messages'], 'readwrite');
+            const store = transaction.objectStore('messages');
+            await store.add(message);
+        }
+
+        async function loadMessages(roomCode) {
+            const transaction = db.transaction(['messages'], 'readonly');
+            const store = transaction.objectStore('messages');
+            const index = store.index('roomCode');
+            const messages = await index.getAll(IDBKeyRange.only(roomCode));
+            
+            messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+                .forEach(message => {
+                    displayMessage(message.audio, message.sender === peer.id);
+                });
+        }
+
+        function displayMessage(audioBlob, isSent) {
+            const messagesContainer = document.getElementById('messages-container');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isSent ? 'sent' : 'received'}`;
+            
+            const audio = document.createElement('audio');
+            audio.controls = true;
+            audio.src = URL.createObjectURL(audioBlob);
+            
+            messageDiv.appendChild(audio);
+            messagesContainer.appendChild(messageDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        // UI functions
+        function showRoom(roomCode) {
+            document.getElementById('join-section').style.display = 'none';
+            document.getElementById('room-section').style.display = 'block';
+            document.getElementById('current-room-code').textContent = roomCode;
+        }
+
+        function leaveRoom() {
+            if (peer) {
+                Object.values(connections).forEach(conn => conn.close());
+                peer.destroy();
+            }
+            cancelRecording();
+            document.getElementById('room-section').style.display = 'none';
+            document.getElementById('join-section').style.display = 'block';
+            document.getElementById('messages-container').innerHTML = '';
+        }
+    </script>
+</body>
+</html>
